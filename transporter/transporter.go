@@ -1,4 +1,4 @@
-package main
+package transporter
 
 type Transporter interface {
 	/* Returns slice of bytes read, or error */

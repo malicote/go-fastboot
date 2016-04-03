@@ -1,7 +1,10 @@
-package main
+package transporter
 
 import (
 	"fmt"
+	"io/ioutil"
+	"strings"
+	"unicode"
 )
 
 const (
@@ -17,14 +20,52 @@ type UsbHandler struct {
 	ep_out uint8
 }
 
-/* Linux USB implementation */
+/* Linux USB implementation of Transporter interface */
 type LinuxUSB struct {
 	UsbHandler
 }
 
+
 func NewLinuxUSB(handler UsbHandler) (*LinuxUSB){
 	return &LinuxUSB{ handler }
 }
+
+func findUsbDevice(base string) (*UsbHandler, error) {
+	is_device := func(path string) bool {
+		if strings.HasPrefix(path, ".") {
+			// Is ./ or ../
+			return false
+		}
+
+		for _, c := range path {
+			ok := (unicode.IsDigit(c) || c == '.' || c == '-')
+			if !ok {
+				// Is an interface or a hub
+				return false
+			}
+		}
+		return true
+	}
+
+	files, err := ioutil.ReadDir(base)
+	if err != nil {
+		fmt.Println("Error reading ", base, ":", err)
+	}
+
+	for _, file := range files {
+		if !is_device(file.Name()) {
+			continue
+		}
+		fmt.Println(file.Name())
+	}
+
+	return new(UsbHandler), nil
+}
+
+func UsbOpen() {
+	findUsbDevice("/sys/bus/usb/devices")
+}
+
 func (usb *LinuxUSB) Read() ([]byte, error) {
 	fmt.Println("Reading from LinuxUSB: ", usb.fname)
 	return nil, nil
