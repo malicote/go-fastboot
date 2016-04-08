@@ -22,5 +22,5 @@ type UsbIfcInfo struct {
 }
 
 // TODO: add description
-type ifc_match_func func(usb_ifc_info UsbIfcInfo) (int)
+type ifc_match_func func(usb_ifc_info UsbIfcInfo) bool
 
