@@ -5,6 +5,7 @@ package transporter
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -42,8 +43,17 @@ func NewLinuxUSB(handler UsbHandler) (*LinuxUSB){
  */
 func descriptor_is_type(buff *bytes.Reader, usb_descriptor_type uint8) bool {
 	descriptor_buff := []uint8{0, 0}
-	n_read, err := buff.ReadAt(descriptor_buff, 0)
+	n_read, err := buff.Read(descriptor_buff)
 	if err != nil || n_read != 2 {
+		return false
+	}
+
+	/* Rollback internal offset */
+	err1 := buff.UnreadByte()
+	err2 := buff.UnreadByte()
+
+	if err1 != nil || err2 != nil {
+		fmt.Println("Error rolling back reader!")
 		return false
 	}
 
@@ -51,21 +61,163 @@ func descriptor_is_type(buff *bytes.Reader, usb_descriptor_type uint8) bool {
 	return descriptor_buff[1] == usb_descriptor_type
 }
 
+func seek_to_next_descriptor_of_type(buff *bytes.Reader, usb_descriptor_type uint8) error {
+	for {
+		if descriptor_is_type(buff, usb_descriptor_type) {
+			return nil
+		}
+
+		size, err := buff.ReadByte()
+		if err != nil {
+			return err
+		} else if size == 0 {
+			return errors.New("Descriptor reports 0 size.")
+		}
+
+		/* Todo: skipping past the end is OK for Seek, do
+		 * we need to catch the error here or let the bytes
+		 * library do it?
+		 */
+		_, err = buff.Seek(int64(size) - 1, 1)
+		if err != nil{
+			return err
+		}
+
+		/* Out of buffer */
+		if buff.Len() == 0 {
+			return errors.New( "Ran out of buffer while parsing.")
+		}
+	}
+}
+
+
 func filter_usb_device(sysfs_name string,
 			dev_data []byte,
 			writable bool,
 			callback ifc_match_func) (ept_in_id int, ept_out_id int, ifc_id int, err error) {
 
+	/* Parse the USB structure read from /dev and send any device descriptions
+	   to the callback to determine if it's a match.
+	 */
+
 	var device_descriptor usb_device_descriptor
 
 	buff := bytes.NewReader(dev_data)
-	if descriptor_is_type(buff, USB_DT_DEVICE) {
-		binary.Read(buff, binary.LittleEndian, &device_descriptor)
-		/* TODO: parse everything then call back */
-		callback(UsbIfcInfo{})
-		return 0, 0, 0, nil
+
+	if !descriptor_is_type(buff, USB_DT_DEVICE) {
+		return -1, -1, -1, errors.New("Data provided is not a device descriptor.")
 	}
-	return 0, 0, 0, nil
+
+	err = binary.Read(buff, binary.LittleEndian, &device_descriptor)
+	if err != nil {
+		return -1, -1, -1, err
+	}
+
+	// fmt.Printf("Data descriptor: %+#v\n", device_descriptor)
+
+	var config_descriptor usb_config_descriptor
+	if !descriptor_is_type(buff, USB_DT_CONFIG) {
+		return -1, -1, -1, errors.New("Device has no config descriptor.")
+	}
+
+	err = binary.Read(buff, binary.LittleEndian, &config_descriptor)
+	if err != nil {
+		return -1, -1, -1, err
+	}
+
+	// fmt.Printf("\nConfig descriptor: %+#v\n", config_descriptor)
+
+	/* Read device serial number (if there is one).
+	 * We read the serial number from sysfs, since it's faster and more
+	 * reliable than issuing a control pipe read, and also won't
+	 * cause problems for devices which don't like getting descriptor
+	 * requests while they're in the middle of flashing.
+	 */
+	serial_number := ""
+	if device_descriptor.ISerialNumber != 0 {
+		serial_path := path.Join(USB_SYSFS_BASE, sysfs_name, "serial")
+		serial, err := ioutil.ReadFile(serial_path)
+		if err != nil {
+			fmt.Println("Error reading serial number: ", err)
+		} else {
+			serial_number = strings.TrimSpace(string(serial))
+		}
+	}
+
+
+	/* Check each interface */
+	for i := uint8(0); i < config_descriptor.BNumInterfaces; i++ {
+		err = seek_to_next_descriptor_of_type(buff, USB_DT_INTERFACE)
+		if err != nil {
+			return -1, -1, -1, err
+		}
+
+		var interface_descriptor usb_interface_descriptor
+
+		err = binary.Read(buff, binary.LittleEndian, &interface_descriptor)
+		if err != nil {
+			return -1, -1, -1, err
+		}
+
+		in, out := -1, -1
+
+		for e := uint8(0); e < interface_descriptor.BNumEndpoints; e++ {
+			err = seek_to_next_descriptor_of_type(buff, USB_DT_ENDPOINT)
+			if err != nil {
+				/* OK, just means there's nothing left to parse */
+				break
+			}
+
+			var endpoint_descriptor usb_endpoint_descriptor
+			err = binary.Read(buff, binary.LittleEndian, &endpoint_descriptor)
+			if err != nil {
+				/* OK, just don't parse this one */
+				break
+			}
+
+			if endpoint_descriptor.BmAttributes & USB_ENDPOINT_XFERTYPE_MASK != USB_ENDPOINT_XFER_BULK {
+				/* Skip, bulk only */
+				continue
+			}
+
+			if endpoint_descriptor.BEndpointAddress & USB_ENDPOINT_DIR_MASK != 0{
+				in = int(endpoint_descriptor.BEndpointAddress)
+			} else {
+				out = int(endpoint_descriptor.BEndpointAddress)
+			}
+
+			/* Skip USB 3.0 SS Endpoint Companion descriptor */
+			if descriptor_is_type(buff, USB_DT_SS_ENDPOINT_COMP) {
+				_, err = buff.Seek(USB_DT_SS_EP_COMP_SIZE, 1)
+				if err != nil {
+					/* OK, I think */
+					break
+				}
+			}
+		}
+
+		info := UsbIfcInfo{
+			DevVendor: 	device_descriptor.IdVendor,
+			DevProduct: 	device_descriptor.IdProduct,
+			DevClass: 	device_descriptor.BDeviceClass,
+			DevSubclass: 	device_descriptor.BDeviceSubClass,
+			DevProtocol: 	device_descriptor.BDeviceProtocol,
+			Writeable: 	writable,
+			SerialNumber:	serial_number,
+			DevicePath:	"usb:" + sysfs_name,
+			IfcClass:	interface_descriptor.BInterfaceClass,
+			IfcSubclass:	interface_descriptor.BInterfaceSubClass,
+			IfcProtocol:	interface_descriptor.BInterfaceProtocol,
+			HasBulkIn:	(in != -1),
+			HasBulkOut:	(out != -1),
+		}
+
+		if callback(info) {
+			return in, out, int(interface_descriptor.BInterfaceNumber), nil
+		}
+	}
+
+	return -1, -1, -1, errors.New("No device found.")
 }
 
 func convertToDevFSName(dir_name string) (string, error) {
@@ -148,6 +300,8 @@ func findUsbDevice(base string, callback ifc_match_func) (*UsbHandler, error) {
 
 		_, _, _, err = filter_usb_device(dir.Name(), dev_buff[0:n_read], writable, callback)
 		if err != nil {
+			/* TODO: debug output */
+			// fmt.Printf("Error reading %s: %s\n", dir.Name(), err)
 			continue
 		}
 

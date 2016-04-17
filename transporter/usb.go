@@ -1,26 +1,27 @@
 package transporter
 
 type UsbIfcInfo struct {
-	dev_vendor 	uint16
-	dev_product 	uint16
+	DevVendor 	uint16
+	DevProduct 	uint16
 
-	dev_class	uint8
-	dev_subclass	uint8
-	dev_protocol	uint8
+	DevClass	uint8
+	DevSubclass	uint8
+	DevProtocol	uint8
 
-	ifc_class	uint8
-	ifc_subclass	uint8
-	ifc_protocol	uint8
+	IfcClass	uint8
+	IfcSubclass	uint8
+	IfcProtocol	uint8
 
-	has_bulk_in	bool
-	hsa_bulk_out	bool
+	HasBulkIn	bool
+	HasBulkOut	bool
 
-	writable	bool
+	Writeable	bool
 
-	serial_number	string
-	device_path	string
+	SerialNumber	string
+	DevicePath	string
 }
 
 // TODO: add description
+/* Return true if matches, false otherwise */
 type ifc_match_func func(usb_ifc_info UsbIfcInfo) bool
 

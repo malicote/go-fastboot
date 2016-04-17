@@ -40,6 +40,7 @@ type usb_device_descriptor struct {
 	BDeviceClass		uint8
 	BDeviceSubClass		uint8
 	BDeviceProtocol		uint8
+	BMaxPacketSize0		uint8
 	IdVendor		uint16
 	IdProduct		uint16
 	BcdDevice		uint16
